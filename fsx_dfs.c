@@ -37,6 +37,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <time.h>
 
 #define NUMPRINTCOLUMNS 32	/* # columns of data to print on each line */
 
@@ -89,7 +90,7 @@ int	debug = 0;			/* -d flag */
 unsigned long	debugstart = 0;		/* -D flag */
 unsigned long	maxfilelen = 256 * 1024 * 1024;	/* -l flag */
 int	sizechecks = 1;			/* -n flag disables them */
-int	maxoplen = 64 * 1024 * 1024;		/* -o flag */
+int	maxoplen = 128 * 1024 * 1024;		/* -o flag */
 int	quiet = 0;			/* -q flag */
 unsigned long progressinterval = 0;	/* -p flag */
 int	readbdy = 1;			/* -r flag */
@@ -103,11 +104,14 @@ long	numops = -1;			/* -N flag */
 int	randomoplen = 1;		/* -O flag disables it */
 int	seed = 1;			/* -S flag */
 int     mapped_writes = 0;              /* -W flag disables */
-int 	mapped_reads = 1;		/* -R flag disables it */
+int 	mapped_reads = 0;		/* -R flag disables it */
 int	fsxgoodfd = 0;
 FILE *	fsxlogf = NULL;
 int badoff = -1;
 int closeopen = 0;
+struct timeval start_time;
+struct timeval finish_time;
+double time_used;
 
 
 
@@ -337,6 +341,17 @@ check_buffers(unsigned offset, unsigned size)
 	}
 }
 
+void display_time(unsigned size, double times)
+{
+	float speed = (unsigned long long)size*1000/times;
+	if (speed < 1024)
+		prt("%f Bytes/s\n", speed);
+	if (speed > 1024 && speed < 1024 * 1024)
+		prt("%f KB/s\n", speed/1024);
+	if (speed > 1024 * 1024)
+		prt("%f MB/s\n", speed/1024/1024);
+}
+
 void open_file(void)
 {
 	fd = open(fname, O_RDWR|O_CREAT, 0666);
@@ -356,32 +371,46 @@ void close_file(void)
 
 void dodedup(char *fname)
 {
+	unsigned size = lseek(fd, (off_t)0, L_XTND);
 	close_file();
 
 	char dedup_file[1024] = "../cmd/dfs_cli dedup ";
 	strcat(dedup_file, fname);
-	prt("deduping...\n");
+	gettimeofday(&start_time, NULL);
 	int ret = system(dedup_file);
 	if (ret != 0){
 		prterr("dedup failed");
 		report_failure(300);
 	}
+	gettimeofday(&finish_time, NULL);
+	time_used =
+		(finish_time.tv_sec-start_time.tv_sec)*1000+
+		(finish_time.tv_usec-start_time.tv_usec)/1000;
+	prt("Dedup speed:");
+	display_time(size, time_used);
 
 	open_file();
 }
 
 void dorestore(char *fname)
 {
+	unsigned size = lseek(fd, (off_t)0, L_XTND);
 	close_file();
 
 	char restore_file[1024] = "../cmd/dfs_cli restore ";
 	strcat(restore_file, fname);
-	prt("restoring...\n");
+	gettimeofday(&start_time, NULL);
 	int ret = system(restore_file);
 	if (ret != 0){
 		prterr("restore failed");
 		report_failure(304);
 	}
+	gettimeofday(&finish_time, NULL);
+	time_used =
+		(finish_time.tv_sec-start_time.tv_sec)*1000+
+		(finish_time.tv_usec-start_time.tv_usec)/1000;
+	prt("Restore speed:");
+	display_time(size, time_used);
 
 	open_file();
 }
@@ -483,8 +512,9 @@ doread(unsigned offset, unsigned size)
 		prterr("doread: lseek");
 		report_failure(140);
 	}
+	gettimeofday(&start_time, NULL);
 	iret = read(fd, temp_buf, size);
-	if (iret != size) {
+		if (iret != size) {
 		if (iret == -1)
 			prterr("doread: read");
 		else
@@ -492,6 +522,12 @@ doread(unsigned offset, unsigned size)
 			    iret, size);
 		report_failure(141);
 	}
+	gettimeofday(&finish_time, NULL);
+	time_used =
+		(finish_time.tv_sec-start_time.tv_sec)*1000+
+		(finish_time.tv_usec-start_time.tv_usec)/1000;
+	prt("Read speed:");
+	display_time(size, time_used);
 	check_buffers(offset, size);
 	if (!docheck(fname)){
 		prterr("doread: file not deduped after read");
@@ -577,6 +613,7 @@ dowrite(unsigned offset, unsigned size)
 {
 	off_t ret;
 	unsigned iret;
+	unsigned iret2;
 
 	//if (docheck(fname))
 	//	dorestore(fname);
@@ -617,6 +654,7 @@ dowrite(unsigned offset, unsigned size)
 		prterr("dowrite: lseek");
 		report_failure(150);
 	}
+	gettimeofday(&start_time, NULL);
 	iret = write(fd, good_buf + offset, size);
 	if (iret != size) {
 		if (iret == -1)
@@ -626,6 +664,15 @@ dowrite(unsigned offset, unsigned size)
 			    iret, size);
 		report_failure(151);
 	}
+	iret2 = fsync(fd);
+	if (iret2 == -1)
+		prterr("fsync error");
+	gettimeofday(&finish_time, NULL);
+	time_used =
+		(finish_time.tv_sec-start_time.tv_sec)*1000+
+		(finish_time.tv_usec-start_time.tv_usec)/1000;
+	prt("Write speed:");
+	display_time(size, time_used);
 	/*if (iret == -1){
 		prterr("dowrite: write");
 		report_failure(151);
@@ -635,7 +682,7 @@ dowrite(unsigned offset, unsigned size)
 		report_failure(303);
 	}
 	else {
-		prt("auto restore triggered\n");
+		//prt("auto restore triggered\n");
 		dodedup(fname);
 	}
 }
@@ -841,7 +888,7 @@ test(void)
 	 * MAPWRITE:    op = 3 or 4
 	 */
 	if (lite ? 0 : op == 3 && (style & 1) == 0){ /* vanilla truncate? */
-		prt("op=%d, dotruncate\n",op);
+		prt("Truncating...\n");
 		dotruncate(random() % maxfilelen);
 	}
 	else {
@@ -856,11 +903,11 @@ test(void)
 				if (offset + size > maxfilelen)
 					size = maxfilelen - offset;
 				if (op != 1){
-					prt("op=%d, domapwrite\n",op);
+					//prt("op=%d, domapwrite\n",op);
 					domapwrite(offset, size);
 				}
 				else{
-					prt("op=%d, dowrite\n",op);
+					//prt("op=%d, dowrite\n",op);
 					dowrite(offset, size);
 				}
 			} else {
@@ -871,11 +918,11 @@ test(void)
 				if (offset + size > file_size)
 					size = file_size - offset;
 				if (op != 0){
-					prt("op=%d, domapread\n",op);
+					//prt("op=%d, domapread\n",op);
 					domapread(offset, size);
 				}
 				else{
-					prt("op=%d, doread\n",op);
+					//prt("op=%d, doread\n",op);
 					doread(offset, size);
 				}
 			}
@@ -892,8 +939,6 @@ void
 cleanup(sig)
 	int	sig;
 {
-	if (docheck(fname))
-		dorestore(fname);
 	if (sig)
 		prt("signal %d\n", sig);
 	prt("testcalls = %lu\n", testcalls);
@@ -912,7 +957,7 @@ usage(void)
 	-l flen: the upper bound on file size (default 256MB)\n\
 	-m startop:endop: monitor (print debug output) specified byte range (default 0:infinity)\n\
 	-n: no verifications of file size\n\
-	-o oplen: the upper bound on operation size (default 64MB)\n\
+	-o oplen: the upper bound on operation size (default 128MB)\n\
 	-p progressinterval: debug output at specified operation interval\n\
 	-q: quieter operation\n\
 	-r readbdy: 4096 would make reads page aligned (default 1)\n\
