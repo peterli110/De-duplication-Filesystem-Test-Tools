@@ -375,14 +375,20 @@ void dodedup(char *fname)
 	close_file();
 
 	char dedup_file[1024] = "../cmd/dfs_cli dedup ";
-	strcat(dedup_file, fname);
-	gettimeofday(&start_time, NULL);
+	strncat(dedup_file, fname, strlen(fname));
+	if(gettimeofday(&start_time, NULL)){
+		fprintf(stderr, "gettimeofday error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 	int ret = system(dedup_file);
 	if (ret != 0){
 		prterr("dedup failed");
 		report_failure(300);
 	}
-	gettimeofday(&finish_time, NULL);
+	if(gettimeofday(&finish_time, NULL)){
+		fprintf(stderr, "gettimeofday error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 	time_used =
 		(finish_time.tv_sec-start_time.tv_sec)*1000+
 		(finish_time.tv_usec-start_time.tv_usec)/1000;
@@ -398,14 +404,20 @@ void dorestore(char *fname)
 	close_file();
 
 	char restore_file[1024] = "../cmd/dfs_cli restore ";
-	strcat(restore_file, fname);
-	gettimeofday(&start_time, NULL);
+	strncat(restore_file, fname, strlen(fname));
+	if(gettimeofday(&start_time, NULL)){
+		fprintf(stderr, "gettimeofday error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 	int ret = system(restore_file);
 	if (ret != 0){
 		prterr("restore failed");
 		report_failure(304);
 	}
-	gettimeofday(&finish_time, NULL);
+	if(gettimeofday(&finish_time, NULL)){
+		fprintf(stderr, "gettimeofday error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 	time_used =
 		(finish_time.tv_sec-start_time.tv_sec)*1000+
 		(finish_time.tv_usec-start_time.tv_usec)/1000;
@@ -420,12 +432,15 @@ int docheck(char *fname)
 	close_file();
 
 	char check_file[1024] = "../cmd/dfs_cli check ";
-	strcat(check_file, fname);
+	strncat(check_file, fname, strlen(fname));
 	FILE *fp;
 	char buffer[1024];
 	fp=popen(check_file, "r");
 	fgets(buffer, sizeof(buffer), fp);
-	pclose(fp);
+	if (pclose(fp) == -1) {
+		fprintf(stderr, "pclose error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 
 	open_file();
 	if (strstr(buffer, "deduped") == NULL)
@@ -512,7 +527,10 @@ doread(unsigned offset, unsigned size)
 		prterr("doread: lseek");
 		report_failure(140);
 	}
-	gettimeofday(&start_time, NULL);
+	if(gettimeofday(&start_time, NULL)){
+		fprintf(stderr, "gettimeofday error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 	iret = read(fd, temp_buf, size);
 		if (iret != size) {
 		if (iret == -1)
@@ -522,7 +540,10 @@ doread(unsigned offset, unsigned size)
 			    iret, size);
 		report_failure(141);
 	}
-	gettimeofday(&finish_time, NULL);
+	if(gettimeofday(&finish_time, NULL)){
+		fprintf(stderr, "gettimeofday error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 	time_used =
 		(finish_time.tv_sec-start_time.tv_sec)*1000+
 		(finish_time.tv_usec-start_time.tv_usec)/1000;
@@ -654,7 +675,10 @@ dowrite(unsigned offset, unsigned size)
 		prterr("dowrite: lseek");
 		report_failure(150);
 	}
-	gettimeofday(&start_time, NULL);
+	if(gettimeofday(&start_time, NULL)){
+		fprintf(stderr, "gettimeofday error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 	iret = write(fd, good_buf + offset, size);
 	if (iret != size) {
 		if (iret == -1)
@@ -667,7 +691,10 @@ dowrite(unsigned offset, unsigned size)
 	iret2 = fsync(fd);
 	if (iret2 == -1)
 		prterr("fsync error");
-	gettimeofday(&finish_time, NULL);
+	if(gettimeofday(&finish_time, NULL)){
+		fprintf(stderr, "gettimeofday error:  %s\n", strerror(errno));
+		exit(-1);
+	}
 	time_used =
 		(finish_time.tv_sec-start_time.tv_sec)*1000+
 		(finish_time.tv_usec-start_time.tv_usec)/1000;
