@@ -31,7 +31,9 @@ int file_number = 0;
 int repo = 0;
 int savedspace = 0;
 int rand_duplicate = 10; //duplicated size = rand()%rand_duplicate + 1;
-int rand_generate = 30;//generated size = rand()%rand_generate + duplicated +1;
+int rand_generate = 20;//generated size = rand()%rand_generate + duplicated +1;
+int testcalls = 0;
+int	sig;
 
 
 void reformat(void)
@@ -205,7 +207,7 @@ void test(char *fname)
 
 	if(repo == blocks_used_in_repo()/256){
 		printf("%s deduped, file size: %d MB, duplicated size: %d MB\n\
-All files:	 file size: %d MB, duplicated size: %d MB\n\
+All files: file size: %d MB, duplicated size: %d MB\n\
 Data in repo: %d MB, space saved: %dMB\n\n", fname, generated, duplicated, \
 		nMBgenerated, nMBduplicated, repo, savedspace);
 	}
@@ -214,7 +216,15 @@ Data in repo: %d MB, space saved: %dMB\n\n", fname, generated, duplicated, \
 		, repo, blocks_used_in_repo()/256);
 		exit(-1);
 	}
+	testcalls++;
+}
 
+void cleanup(sig)
+{
+	if (sig)
+		printf("signal %d\n", sig);
+	printf("testcalls = %lu\n", testcalls);
+	exit(sig);
 }
 
 void usage(void)
@@ -224,7 +234,7 @@ void usage(void)
 	-h: help\n\
 	-n number: total files to generate (default 0=infinite)\n\
 	-d size: random duplications in each file from 1 to size MB (default 10)\n\
-	-g size: random size of data in each file from 1 to size MB (default 30)\n\
+	-g size: random size of data in each file from 1 to size MB (default 20)\n\
 	Notice: maxmum size of a single file will be g+d MB\n");
 	exit(90);
 }
@@ -244,7 +254,7 @@ int main(int argc, char **argv)
 	}
 
 	while ((ch = getopt(argc, argv, "n:d:g:h"))
-	       != EOF)
+	       != EOF){
 		switch (ch) {
 		case 'n':
 			n = strtol(optarg, NULL, 10);
@@ -281,8 +291,21 @@ int main(int argc, char **argv)
 			break;
 
 		default:
+			usage();
 			break;
 		}
+	}
+
+	signal(SIGHUP,	cleanup);
+	signal(SIGINT,	cleanup);
+	signal(SIGPIPE,	cleanup);
+	signal(SIGALRM,	cleanup);
+	signal(SIGTERM,	cleanup);
+	signal(SIGXCPU,	cleanup);
+	signal(SIGXFSZ,	cleanup);
+	signal(SIGVTALRM,	cleanup);
+	signal(SIGUSR1,	cleanup);
+	signal(SIGUSR2,	cleanup);
 
 	reformat();
 	if (n == 0){
