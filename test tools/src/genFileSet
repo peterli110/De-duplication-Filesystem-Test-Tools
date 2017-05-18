@@ -1,0 +1,164 @@
+#!/usr/bin/env ruby
+
+# Local libraries
+$:.push( File.expand_path(File.dirname(__FILE__)) )
+
+$stdout.sync = true
+load 'genChunk.rb'
+
+$topDir = "#{File.dirname(__FILE__)}/../.."
+
+setNumber = ARGV[0].to_i || 1
+$installDir = ARGV[1] || "#{$topDir}/tests/data"
+$tstFileDir = ARGV[2] || $installDir
+
+puts "setNumber:#{setNumber}"
+puts "installDir:#{$installDir}"
+
+dataDir = $installDir
+
+set = {}
+set[setNumber] = $tstFileDir + "/set#{setNumber}"
+
+unless !set[setNumber] || File.exist?(set[setNumber])
+  puts "mkdir_p #{set[setNumber]}"
+  FileUtils.mkdir_p( set[setNumber] )
+end
+
+unless !set[1] || File.exist?(tfile = set[1] + "/tf1")
+  dataSet = genBlocks("a17", 25, 2)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(set[1] + "/tf1", "w+") do |f|
+    f.write(IO.read( dataSet + "/" + flist[0] ))
+    f.seek(4096*3, IO::SEEK_CUR)
+    f.write(IO.read( dataSet + "/" + flist[1] ))
+    f.seek(4096*5, IO::SEEK_CUR)
+    f.write(IO.read( dataSet + "/" + flist[1] ))
+    f.seek(4096*4, IO::SEEK_CUR)
+    f.write(IO.read( dataSet + "/" + flist[0] ))
+  end
+end
+
+unless !set[1] || File.exist?(tfile = set[1] + "/tf2")
+  dataSet = genBlocks("a17", 256, 20)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(set[1] + "/tf2", "w+") do |f|
+    0.upto(flist.size - 1) do |i|
+      f.write(IO.read( dataSet + "/" + flist[i] ))
+      f.write(IO.read( dataSet + "/" + flist[2 * i % flist.size] ))
+    end
+  end
+end
+
+unless !set[2] || File.exist?(tfile = set[2] + "/tf1")
+  dataSet = genBlocks("a17", 32, 12)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(set[2] + "/tf1", "w+") do |f|
+    0.upto(flist.size - 1) do |i|
+      f.write(IO.read( dataSet + "/" + flist[i] ))
+      f.seek(4096*(i % 4), IO::SEEK_CUR)
+      f.write(IO.read( dataSet + "/" + flist[3 * i % flist.size] ))
+    end
+  end
+end
+
+unless !set[2] || File.exist?(tfile = set[2] + "/tf2")
+  dataSet = genBlocks("a17", 64, 16)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(set[2] + "/tf2", "w+") do |f|
+    0.upto(flist.size - 1) do |i|
+      f.write(IO.read( dataSet + "/" + flist[i] ))
+      f.write(IO.read( dataSet + "/" + flist[(2 * i + 1) % flist.size] ))
+    end
+  end
+end
+
+unless !set[3] || File.exist?(tfile = set[3] + "/tf1")
+  dataSet = genBlocks("a17", 32, 187)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(tfile, "w+") do |f|
+    0.upto(flist.size / 2) do |i|
+      f.write(IO.read( dataSet + "/" + flist[i] ))
+      f.seek(4096*224, IO::SEEK_CUR);
+    end
+  end
+end
+
+unless !set[3] || File.exist?(tfile = set[3] + "/tf2")
+  dataSet = genBlocks("a17", 32, 187)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(tfile, "w+") do |f|
+    (flist.size / 2).upto(flist.size - 1) do |i|
+      f.write(IO.read( dataSet + "/" + flist[i] ))
+      f.seek(4096*224, IO::SEEK_CUR);
+    end
+  end
+end
+
+unless !set[4] || File.exist?(tfile = set[4] + "/tf1")
+  dataSet = genBlocks("a17", 32, 187)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(set[4] + "/tf1", "w+") do |f|
+    0.upto(flist.size / 2) do |i|
+      f.write(IO.read( dataSet + "/" + flist[i] ))
+      f.seek(4096*224, IO::SEEK_CUR)
+#      f.write(IO.read( dataSet + "/" + flist[2 * i % flist.size] ))
+    end
+  end
+end
+
+unless !set[4] || File.exist?(tfile = set[4] + "/tf2")
+  dataSet = genBlocks("a17", 32, 187)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(set[4] + "/tf2", "w+") do |f|
+    (flist.size / 2).upto(flist.size - 1) do |i|
+      f.write(IO.read( dataSet + "/" + flist[i] ))
+      f.seek(4096*224, IO::SEEK_CUR)
+#      f.write(IO.read( dataSet + "/" + flist[2 * i % flist.size] ))
+    end
+  end
+end
+
+unless !set[5] || File.exist?(tfile = set[5] + "/tf1")
+  dataSet = genBlocks("a15", 256, 1)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  File.open(set[5] + "/tf1", "w+") do |f|
+    0.upto(flist.size-1) do |i|
+      f.write(IO.read( dataSet + "/" + flist[i] ))
+#      f.seek(4096*224, IO::SEEK_CUR)
+#      f.write(IO.read( dataSet + "/" + flist[2 * i % flist.size] ))
+    end
+  end
+end
+
+unless !set[99] || File.exist?(tfile = set[99] + "/tf1")
+  dataSet = genBlocks("a16", 256, 30)
+  flist = Dir.entries(dataSet).sort
+  flist.shift(2) # take out . & ..
+  puts "generating #{tfile} ..."
+  1.upto(flist.size) do |i|
+      File.open(set[99] + "/tf" + i.to_s, "w+") do |f|
+      f.write(IO.read( dataSet + "/" + flist[i-1] ))
+#      f.seek(4096*224, IO::SEEK_CUR)
+#      f.write(IO.read( dataSet + "/" + flist[2 * i % flist.size] ))
+    end
+  end
+end

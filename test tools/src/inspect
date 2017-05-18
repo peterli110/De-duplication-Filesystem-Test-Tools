@@ -1,0 +1,548 @@
+#!/usr/bin/env ruby
+
+$exitOnError = nil
+$MaxNChildren = 16
+$BucketSize = (4 << 10)
+$NPartition = (1 << 12)
+
+$KeySize = 16 # md5 sum
+
+$containerInfo = {}
+
+require 'etc'
+%w( rubygems pathname optparse ostruct fileutils thread
+    digest/md5 find json time pp set zlib scanf yaml/store
+    enumerator ).each { |lib| require lib }
+
+# Local libraries
+$:.push( File.expand_path(File.dirname(__FILE__)) )
+
+$topDir = "#{File.dirname(__FILE__)}/../.."
+$:.push( $topDir + "/lib/.libs" )
+
+$mdpath = ENV["MDPATH"] || "/var/md"
+
+$nStubs = 0
+$nFiles = 0
+$nStubsVerified = 0
+$nStubsError = 0
+
+#
+# Standard App Options
+#
+
+class StandardAppOptions
+  attr_accessor :repo_dir
+
+  def initialize( args )
+    @repo_dir = "#{$mdpath}/repo"
+    super()
+  end
+
+  def parse!( opts, args, checks = {} )
+    opts.parse!( args )
+    unless @repo_dir
+      puts opts
+      exit 1
+    end
+    if checks[:check_repo]
+      unless File.exist? @repo_dir
+        $stderr.puts "#{$0}: No repository '#{@repo_dir}' found, exiting."
+        exit 1
+      end
+    end
+  end
+
+  def add_standard_opts( opts, args = {} )
+    opts.on( "--repo DIR", 
+             "Location of the repository", "[Defaults to #{@repo_dir}]" ) do |x|
+      @repo_dir = x
+    end
+    opts.on( "-h", "--help", "Show this message" ) do
+      puts opts
+      exit
+    end
+  end
+end
+
+require 'ffi'
+
+module XattrTest
+  extend FFI::Library
+  ffi_lib 'c'
+  attach_function :getxattr, [ :string, :string, :pointer, :int ], :int
+end
+
+module FfiCustomTest
+  extend FFI::Library
+  ffi_lib 'c'
+  ffi_lib "#{$topDir}/lib/.libs/libdfs.so"
+  attach_function :ddp_setDebugLevel, [ :int ], :int
+  attach_function :dfs_initialize, [ :pointer ], :int
+  attach_function :ddp_verifyStub, [ :pointer, :int ], :int
+  attach_function :ddp_verifyChunk, [ :int, :int, :int, :pointer ], :int
+  attach_function :dfs_getContainerInfo, [ :int, :pointer, :pointer ], :int
+end
+
+def getContainerInfo( cId )
+  x = FFI::MemoryPointer.new( :int, 1 )
+  y = FFI::MemoryPointer.new( :int, 1 )
+  rc = FfiCustomTest.dfs_getContainerInfo( cId, x, y )
+  raise if rc != 0
+  z = x.read_array_of_int(1)[0]
+  w = y.read_array_of_int(1)[0]
+  return z, w
+end
+
+  def check_stub(bufptr, buflen)
+    header = bufptr.read_string(48)
+    saved_cksum = header[44,4].unpack('L')[0]
+    header[44,4] = [0,0,0,0].pack("C*")
+    cksum = Zlib::crc32(header, 0)
+    cksum = Zlib::crc32((bufptr + 48).read_string(buflen-48), cksum)
+    if cksum != saved_cksum
+      puts "ERROR: stub cksum mismatch: " +
+        "#{cksum.to_s(16)}, #{saved_cksum.to_s(16)}"
+      raise
+    end
+    cksum == saved_cksum
+  end
+
+  def dump_stub(fname)
+    stubBuf = FFI::MemoryPointer.new(:char, 4096)
+    res = XattrTest.getxattr(fname, "trusted.dfs_stub", stubBuf, 4096)
+    puts "res:#{res}; stub:#{stubBuf.inspect}"
+    if res < 0
+      puts "getxattr error: may need root access"
+      return
+    end
+    check_stub(stubBuf, res)
+    bufptr = stubBuf;
+    head = bufptr.read_string(4)
+    bufptr += 4
+    puts "head:#{head}"
+    version, flags, origFileSize, nNewBlocks, nOldBlocks, 
+    nStubEntries, stubFileCksum, origFileCksum = 
+      bufptr.read_string(48).unpack('LQQQQLLL')
+    bufptr += 48
+    puts "version:#{version}"
+    puts "flags:#{flags}"
+    puts "origFileSize:#{origFileSize}"
+    puts "nNewBlocks:#{nNewBlocks}"
+    puts "nOldBlocks:#{nOldBlocks}"
+    puts "nStubEntries:#{nStubEntries}"
+    puts "stubFileCksum:#{stubFileCksum.to_s(16)}"
+    puts "origFileCksum:#{origFileCksum.to_s(16)}"
+    bufptr += 4 #filler to make it 8-byte aligned
+    0.upto(nStubEntries-1) do |i|
+      containerId, blockNumber, nBlks = bufptr.read_string(12).unpack('LLL')
+      bufptr += 12
+      puts "SE[#{i}]: (#{containerId}, #{blockNumber}, #{nBlks})"
+    end
+  end
+
+  def restore_data(stubName, fname)
+    puts "restore_data: #{stubName}->#{fname}"
+  end
+
+$junk_filler = 320
+
+class Repo
+  attr_accessor :dir
+
+  def initialize( dir )
+    @dir = dir
+  end
+
+  def metaFile
+    dir + "/index.meta"
+  end
+
+  def deltaFile
+    dir + "/index.delta"
+  end
+
+  def oldDeltaFile
+    dir + "/index.delta.1"
+  end
+
+  def dataFile
+    dir + "/index"
+  end
+
+  def BucketMetaSize
+    $MaxNChildren + 2 #dirty:1; nEntries:16
+  end
+
+  def each_partition
+    0.upto($NPartition-1) do 
+      yield
+    end
+  end
+
+  def childIndex(parentIndex, child)
+    1 + parentIndex * $MaxNChildren + child
+  end
+
+  def constraint2str(constraint)
+    bits = constraint[0]
+    size = constraint[1]
+    "\"#{"%0#{size}d" % bits.to_s(2)}\""
+  end
+
+  def dump_children(bucketId, children)
+    bucketIndex = bucketId / $NPartition
+    res = "(#{bucketIndex})->" + "["
+    children.each do |c|
+      bits = c[0].to_i(2)
+      size = c[1]
+      child = bits << (4 - size)
+#      res += "#{constraint2str(c)} (#{childIndex(bucketIndex, child)}), "
+#      res += "#{c.inspect} (#{childIndex(bucketIndex, child)}), "
+      res += "\"#{"%0#{size}d" % bits.to_s(2)}\" (#{childIndex(bucketIndex, child)}), "
+    end
+    res += "]"
+    res
+  end
+
+  def read_bucket(bucketId, nEntries)
+    bucketIndex = bucketId / $NPartition
+    offset = bucketId * $BucketSize
+    File.open(dataFile, "r") do |f|
+      f.seek(bucketId * $BucketSize)
+      0.upto(nEntries-1) do |entry|
+        hash = f.read($KeySize)
+        nBlks = hash.unpack('C*')[$KeySize-1]+1;
+        origKeyUnpack = hash.unpack('C*')
+        origKeyUnpack[$KeySize-1] = bucketId
+        origKey = origKeyUnpack.pack('C*')
+#        puts "origKey = #{origKey.unpack('H*')}"
+#        puts "hash = #{hash.unpack('H*')}"
+        
+#        junk = f.read(24) # TODO: filler to be taken out later
+        cksum = f.read(4).unpack('L')
+        containerId, blockNumber = f.read(8).unpack('LL')
+        puts "bucket[#{bucketId.to_s(16)}]" + 
+          "(#{bucketIndex})" + 
+          "[#{entry}]: #{hash.unpack('H*')}" +
+          "#{"%08x" % cksum}" + 
+          "(#{containerId}, #{blockNumber})" if $verbose > 1
+        $containerInfo[containerId] ||= []
+        $containerInfo[containerId].push [blockNumber, nBlks, bucketId, origKey]
+                       
+        junk = f.read($junk_filler) # TODO: filler to be taken out later
+      end
+    end        
+  end
+
+  def parse_constraints(constraints)
+    children = []
+    i = 0
+    constraints.each_byte do |byte|
+      size = (byte >> 4)
+      bits = (byte & 0x0f)
+      break if size == 0x0f 
+      bits = bits.to_s(2)[0,size]
+      children.push([bits, size])
+      i += 1
+      break if i >= $MaxNChildren
+    end
+    children
+  end
+
+  def load_delta(df = deltaFile)
+    return unless File.exist?( df )
+    File.open(df, "r") do |f|
+      while (line = f.gets)
+        partition, hexKey, nBlks_1, cksum, containerId, blockNumber = 
+          line.scanf("%x %s %d %x %d %d")
+        origKey = Array(hexKey + ("%04x" % partition)[-2,2]).pack('H*')
+        deltaEntry = [blockNumber, nBlks_1+1, -1, origKey]
+        $containerInfo[containerId] ||= []
+        cInfo = $containerInfo[containerId]
+        entry = cInfo.assoc( blockNumber )
+        if entry
+          if entry[1] != deltaEntry[1] || entry[3] != deltaEntry[3]
+            puts "ERROR: cInfo[#{containerId}] collision: " + 
+              "#{entry.inspect} != #{deltaEntry.inspect}"
+            exit
+          end
+        else
+          if df == oldDeltaFile
+            puts "WARN: cInfo[#{containerId}] missing #{deltaEntry.inspect}"
+          end
+          $containerInfo[containerId].push deltaEntry
+        end
+      end
+    end
+  end
+
+  def load_meta
+    unless File.exist?( metaFile )
+      puts "missing: #{metaFile}"
+      return
+    end
+    totalNEntries = 0
+    totalOEntries = 0
+    File.open(metaFile, "r") do |f|
+      header = f.read(24)
+      nBuckets, nPartition, bucketSize, maxBucketIndex = 
+        f.read(16).unpack('LLLL')
+      puts "#{metaFile}: nb:#{nBuckets} nP:#{nPartition} " +
+        "bS:#{bucketSize} mB:#{maxBucketIndex}" if $verbose > 0
+      raise "bucketSize mismatch" if bucketSize != $BucketSize
+      raise "nPartition mismatch" if nPartition != $NPartition
+      0.upto(nBuckets-1) do |bucketId|
+        constraints = f.read($MaxNChildren)
+        nEntries = f.read(2).unpack('S')[0]
+        oEntries = f.read(2).unpack('S')[0]
+        totalNEntries += nEntries
+        totalOEntries += oEntries
+#        nEntries >>= 1 # take out (little endian) leading bit 'dirty'
+        if oEntries > 0 || nEntries > 0
+          if $verbose > 1
+            children = parse_constraints(constraints)
+            puts "bucket[#{bucketId.to_s(16)}]: {#{oEntries}, #{nEntries}}" + 
+              ", " + dump_children(bucketId, children)
+          end
+          read_bucket(bucketId, oEntries)
+        end
+      end
+    end
+    puts "totalEntries: {#{totalNEntries}, #{totalOEntries}}" if $verbose > 0
+  end
+
+  def verify_containers
+    puts "# of containers: #{$containerInfo.size}" if $verbose > 0
+    blocksUsed, blocksAvail = 0, 0
+    cIds = $containerInfo.keys.sort
+    cIds.each do |cId|
+      cInfo = $containerInfo[ cId ]
+      cInfo.sort!
+      if cInfo.size > 0
+        blocksReferenced = cInfo[-1][0] + cInfo[-1][1]
+        blocksUsed, blocksAvail = getContainerInfo( cId )
+        if blocksUsed != blocksReferenced
+          if blocksUsed < blocksReferenced 
+            puts "ERROR: container[#{cId}] invalid data referenced: " +
+              "#{blocksUsed} < #{blocksReferenced}"
+          else
+            puts "WARNING: container[#{cId}] usage mismatch: " +
+              "#{blocksUsed} != #{blocksReferenced}"
+          end
+          puts "ERROR: cInfo[#{cId}]: #{cInfo.inspect}" if $verbose > 2
+          $rc = -1
+        end
+      end
+      cInfo.each_index do |i|
+        next if (i+1 >= cInfo.size)
+        blockNumber = cInfo[i][0]
+        nBlks = cInfo[i][1]
+        nextBlockNumber = cInfo[i+1][0]
+        if blockNumber + nBlks != nextBlockNumber
+          puts "WARNING: data not contiguous: cInfo[#{cId}][#{i}]" +
+            ":(#{blockNumber} + #{nBlks}) != #{cInfo[i+1][0]}"
+          puts "ERROR: cInfo[#{cId}]: #{cInfo.inspect}" if $verbose > 2
+          $rc = -1
+        end
+      end
+      puts "cInfo[#{cId}]: #{cInfo.size} chunks; #{blocksUsed} blocks" +
+        "; #{blocksAvail} avail" if $verbose > 0
+      next unless $verify
+      cInfo.each do |x|
+        blockNumber = x[0]
+        nBlks = x[1]
+        hash = x[3]
+        rc = FfiCustomTest.ddp_verifyChunk(cId, blockNumber, nBlks, hash)
+        puts "\t%s %8x %2x" % 
+          [hash.unpack('H*')[0], blockNumber, nBlks-1] if $verbose > 1
+        if rc != 1
+          puts "ERROR: chunk(cId=%2d blk=%4x nBlks=%2x %s): %d" % 
+            [cId, blockNumber, nBlks-1, hash.unpack('H*')[0], rc]
+          $rc = -1
+        end
+        $nChunkVerified += 1
+      end
+    end
+  end
+end
+
+# default check is to skip; 0 for patch chains only; 1 for all chunks
+$md5chk = nil
+
+# Parse out the command line options
+class AppOptions < StandardAppOptions
+  attr_accessor :debug
+  attr_accessor :dump
+  attr_accessor :stub
+  attr_accessor :restore
+  attr_accessor :traceContainer
+  attr_accessor :dirList
+
+  def initialize( args )
+    super
+
+    opts = OptionParser.new do |opts|
+      opts.banner = "Usage: #{$0} [options]"
+      add_standard_opts( opts )
+
+      @debug = false
+      opts.on( "--debug", "Run on debug mode" ) do |x|
+        @debug = x
+      end
+
+      $dump = false
+      opts.on( "--dump", "Output detail on entries" ) do |x|
+        $dump = x
+      end
+
+      @stub = false
+      opts.on( "--stub NAME", "stub file to inspect") do |x|
+        @stub = x
+      end
+
+      @restore = false
+      opts.on( "--restore NAME", "file to contain restored data") do |x|
+        @restore = x
+      end
+
+      @traceContainer = false
+      opts.on( "--traceContainer NAME", "trace given containerID") do |x|
+        @traceContainer = x
+      end
+
+      $verbose = 0
+      opts.on( "--verbose LEVEL", "output more info" ) do |x|
+        $verbose = x.to_i
+      end
+
+      $verify = false
+      opts.on( "--verify", "verify in detail" ) do |x|
+        $verify = true
+      end
+
+      opts.on( "--dirs x,y,z", Array, 
+               "list of directory trees separated by commas" ) do |list|
+        @dirList = list
+      end
+    end
+
+    parse!( opts, args )
+  end
+end
+
+def data_path( chunk )
+  make_hashstr_path( $data_dir, chunk )
+end
+
+def is_dfs_stub( fname )
+#  return false if File.size( fname ) != 0
+  stubBuf = FFI::MemoryPointer.new(:char, 4096)
+  res = XattrTest.getxattr(fname, "trusted.dfs_stub", stubBuf, 4096)
+  return false if res < 0
+  check_stub(stubBuf, res)
+end
+
+def inspect_tree( dir, options )
+  puts "inspect_tree:#{dir} ..." if $verbose > 0
+  return unless File.exist?( dir )
+  Find.find(dir) do |name|
+    puts "----:#{name}" if $verbose > 2
+    if File.file?( name )
+      if is_dfs_stub( name )
+        $nStubs += 1
+        puts "stub:#{name}" if $verbose > 1
+        if $verify 
+          unless FfiCustomTest.ddp_verifyStub(name, 0) == 0
+            puts "ERROR: bad stub file: #{name}"
+            $nStubsErrors += 1
+            $rc = -1
+          else
+            puts "verified:#{name}" if $verbose > 1
+            $nStubsVerified += 1
+          end
+        end
+      else
+        $nFiles += 1
+        puts "file:#{name}" if $verbose > 1
+      end
+    end
+  end
+  puts "inspect_tree:#{dir} done" if $verbose > 1
+  puts "nStubs:#{$nStubs}; nFiles:#{$nFiles}; verified:#{$nStubsVerified}" if
+    $verbose > 0
+end
+
+# The actual App
+class App 
+  attr_accessor :options
+  attr_accessor :repo
+
+  def initialize( args )
+    @options = AppOptions.new( args )
+    @repo = Repo.new( @options.repo_dir )
+  end
+
+  def run
+    $rc = 0
+    $nChunkVerified = 0
+
+    if options.debug
+      FfiCustomTest.ddp_setDebugLevel(2)
+    end
+
+    if options.dirList
+      options.dirList.each do |x|
+        inspect_tree( x, options )
+      end
+      return
+    end
+
+    if options.stub
+      return repo.restore_data(options.stub, options.restore) if options.restore
+      return repo.dump_stub(options.stub) 
+    end
+    if options.traceContainer
+      
+    end
+    repo.load_meta
+    repo.load_delta
+    repo.load_delta(repo.oldDeltaFile)
+    repo.verify_containers
+    puts "Chunks verified: #{$nChunkVerified}" if $rc == 0 && $verbose > 0
+  end
+end
+
+begin
+  $pgm = "#{$0} #{ARGV.inspect}"
+=begin
+  store = YAML::Store.new("tstData.yml")
+  Find.find(".") do |name|
+    if File.file?( name )
+      store.transaction do 
+        store[name] = File.size(name)
+      end
+    end
+  end
+  store.transaction do 
+    store.roots.each do |x|
+      puts "entry: #{x}->#{store[x]}"
+    end
+  end
+  exit
+=end
+  
+  rc = FfiCustomTest.dfs_initialize($mdpath)
+  unless rc == 0
+    puts "ERROR: cannot initialize dfs(#{$mdpath})"
+    raise
+  end
+
+  app = App.new( ARGV )
+  app.run
+  exit $rc
+rescue => detail
+  puts "#{$pgm} failed:#{detail}(#{detail.class})\n" +
+    "#{detail.backtrace.join("\n\tfrom ")}"
+  exit -1
+end
